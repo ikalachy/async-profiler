@@ -25,6 +25,7 @@
 #include "perfEvents.h"
 #include "allocTracer.h"
 #include "lockTracer.h"
+#include "flameGraph.h"
 #include "frameName.h"
 #include "stackFrame.h"
 #include "symbols.h"
@@ -181,9 +182,9 @@ const char* Profiler::findNativeMethod(const void* address) {
     return NULL;
 }
 
-int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames) {
+int Profiler::getNativeTrace(int tid, ASGCT_CallFrame* frames) {
     const void* native_callchain[MAX_NATIVE_FRAMES];
-    int native_frames = PerfEvents::getCallChain(native_callchain, MAX_NATIVE_FRAMES);
+    int native_frames = PerfEvents::getCallChain(tid, native_callchain, MAX_NATIVE_FRAMES);
 
     for (int i = 0; i < native_frames; i++) {
         const void* address = native_callchain[i];
@@ -224,8 +225,11 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
         }
 
         if (top_frame.pop()) {
-            // Retry with the fixed context
-            VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
+            // Retry with the fixed context, but only if PC looks reasonable,
+            // otherwise AsyncGetCallTrace may crash
+            if (addressInCode((const void*)top_frame.pc())) {
+                VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
+            }
             top_frame.restore(pc, sp, fp);
 
             if (trace.num_frames > 0) {
@@ -244,21 +248,6 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
     // Record failure
     int type = -trace.num_frames < FAILURE_TYPES ? -trace.num_frames : -ticks_unknown_state;
     atomicInc(_failures[type]);
-    return 0;
-}
-
-int Profiler::getJavaTraceJVMTI(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int max_depth) {
-    jint num_frames;
-    if (VM::jvmti()->GetStackTrace(NULL, 0, max_depth, jvmti_frames, &num_frames) == 0 && num_frames > 0) {
-        // Profiler expects stack trace in AsyncGetCallTrace format; convert it now
-        for (int i = 0; i < num_frames; i++) {
-            frames[i].method_id = jvmti_frames[i].method;
-            frames[i].bci = 0;
-        }
-        return num_frames;
-    }
-
-    atomicInc(_failures[-ticks_no_Java_frame]);
     return 0;
 }
 
@@ -289,6 +278,27 @@ bool Profiler::fillTopFrame(const void* pc, ASGCT_CallFrame* frame) {
     return method != NULL;
 }
 
+bool Profiler::addressInCode(const void* pc) {
+    // 1. Check if PC lies within JVM's compiled code cache
+    // Address in CodeCache is executable if it belongs to a Java method or a runtime stub
+    if (pc >= _jit_min_address && pc < _jit_max_address) {
+        _jit_lock.lockShared();
+        bool valid = _java_methods.find(pc) != NULL || _runtime_stubs.find(pc) != NULL;
+        _jit_lock.unlockShared();
+        return valid;
+    }
+
+    // 2. Check if PC belongs to executable code of shared libraries
+    for (int i = 0; i < _native_lib_count; i++) {
+        if (_native_libs[i]->contains(pc)) {
+            return true;
+        }
+    }
+    
+    // This can be some other dynamically generated code, but we don't know it. Better stay safe.
+    return false;
+}
+
 void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmethodID event) {
     u64 lock_index = atomicInc(_total_samples) % CONCURRENCY_LEVEL;
     if (!_locks[lock_index].tryLock()) {
@@ -298,17 +308,15 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
 
     atomicInc(_total_counter, counter);
 
-    ASGCT_CallFrame* frames = _calltrace_buffer[lock_index]._asgct_frames;
-    int num_frames;
+    ASGCT_CallFrame* frames = _calltrace_buffer[lock_index];
+    int tid = PerfEvents::tid();
 
-    if (event == NULL) {
-        num_frames = getNativeTrace(ucontext, frames);
-        num_frames += getJavaTraceAsync(ucontext, frames + num_frames, MAX_STACK_FRAMES - num_frames);
-    } else {
-        // Events like object allocation happen at known places where it is safe to call JVM TI
-        jvmtiFrameInfo* jvmti_frames = _calltrace_buffer[lock_index]._jvmti_frames;
-        num_frames = makeEventFrame(frames, event_type, event);
-        num_frames += getJavaTraceJVMTI(jvmti_frames + num_frames, frames + num_frames, MAX_STACK_FRAMES - num_frames);
+    int num_frames = event != NULL ? makeEventFrame(frames, event_type, event) : 0;
+    num_frames += getNativeTrace(tid, frames);
+    num_frames += getJavaTraceAsync(ucontext, frames + num_frames, MAX_STACK_FRAMES - 1 - num_frames);
+
+    if (_threads) {
+        num_frames += makeEventFrame(frames + num_frames, BCI_THREAD_ID, (jmethodID)(uintptr_t)tid);
     }
 
     if (num_frames > 0) {
@@ -319,6 +327,13 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, jmetho
     _locks[lock_index].unlock();
 }
 
+void Profiler::initStateLock() {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&_state_lock, &attr);
+}
+
 void Profiler::resetSymbols() {
     for (int i = 0; i < _native_lib_count; i++) {
         delete _native_libs[i];
@@ -326,7 +341,7 @@ void Profiler::resetSymbols() {
     _native_lib_count = Symbols::parseMaps(_native_libs, MAX_NATIVE_LIBS);
 }
 
-Error Profiler::start(const char* event, long interval, int frame_buffer_size) {
+Error Profiler::start(const char* event, long interval, int frame_buffer_size, bool threads) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE) {
         return Error("Profiler already started");
@@ -349,6 +364,7 @@ Error Profiler::start(const char* event, long interval, int frame_buffer_size) {
     _frame_buffer = (ASGCT_CallFrame*)malloc(_frame_buffer_size * sizeof(ASGCT_CallFrame));
     _frame_buffer_index = 0;
     _frame_buffer_overflow = false;
+    _threads = threads;
 
     resetSymbols();
 
@@ -430,10 +446,11 @@ void Profiler::dumpSummary(std::ostream& out) {
  * 
  * <frame>;<frame>;...;<topmost frame> <count>
  */
-void Profiler::dumpCollapsed(std::ostream& out, Counter counter) {
+void Profiler::dumpCollapsed(std::ostream& out, Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE) return;
 
+    FrameName fn(args._simple, false, _threads);
     u64 unknown = 0;
 
     for (int i = 0; i < MAX_CALLTRACES; i++) {
@@ -441,15 +458,15 @@ void Profiler::dumpCollapsed(std::ostream& out, Counter counter) {
         if (trace._samples == 0) continue;
 
         if (trace._num_frames == 0) {
-            unknown += (counter == COUNTER_SAMPLES ? trace._samples : trace._counter);
+            unknown += (args._counter == COUNTER_SAMPLES ? trace._samples : trace._counter);
             continue;
         }
 
         for (int j = trace._num_frames - 1; j >= 0; j--) {
-            FrameName fn(_frame_buffer[trace._start_frame + j]);
-            out << fn.toString() << (j == 0 ? ' ' : ';');
+            const char* frame_name = fn.name(_frame_buffer[trace._start_frame + j]);
+            out << frame_name << (j == 0 ? ' ' : ';');
         }
-        out << (counter == COUNTER_SAMPLES ? trace._samples : trace._counter) << "\n";
+        out << (args._counter == COUNTER_SAMPLES ? trace._samples : trace._counter) << "\n";
     }
 
     if (unknown != 0) {
@@ -457,10 +474,43 @@ void Profiler::dumpCollapsed(std::ostream& out, Counter counter) {
     }
 }
 
+void Profiler::dumpFlameGraph(std::ostream& out, Arguments& args) {
+    MutexLocker ml(_state_lock);
+    if (_state != IDLE) return;
+
+    FlameGraph flamegraph(args._title, args._width, args._height, args._minwidth, args._reverse);
+    FrameName fn(args._simple, false, _threads);
+
+    for (int i = 0; i < MAX_CALLTRACES; i++) {
+        CallTraceSample& trace = _traces[i];
+        if (trace._samples == 0) continue;
+
+        u64 samples = (args._counter == COUNTER_SAMPLES ? trace._samples : trace._counter);
+        flamegraph.depth(trace._num_frames);
+
+        Trie* f = flamegraph.root();
+        if (args._reverse) {
+            for (int j = 0; j < trace._num_frames; j++) {
+                const char* frame_name = fn.name(_frame_buffer[trace._start_frame + j]);
+                f = f->addChild(frame_name, samples);
+            }
+        } else {
+            for (int j = trace._num_frames - 1; j >= 0; j--) {
+                const char* frame_name = fn.name(_frame_buffer[trace._start_frame + j]);
+                f = f->addChild(frame_name, samples);
+            }
+        }
+        f->addLeaf(samples);
+    }
+
+    flamegraph.dump(out);
+}
+
 void Profiler::dumpTraces(std::ostream& out, int max_traces) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE) return;
 
+    FrameName fn(false, true, _threads);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
@@ -480,8 +530,8 @@ void Profiler::dumpTraces(std::ostream& out, int max_traces) {
         }
 
         for (int j = 0; j < trace._num_frames; j++) {
-            FrameName fn(_frame_buffer[trace._start_frame + j], true);
-            snprintf(buf, sizeof(buf), "  [%2d] %s\n", j, fn.toString());
+            const char* frame_name = fn.name(_frame_buffer[trace._start_frame + j]);
+            snprintf(buf, sizeof(buf), "  [%2d] %s\n", j, frame_name);
             out << buf;
         }
         out << "\n";
@@ -492,6 +542,7 @@ void Profiler::dumpFlat(std::ostream& out, int max_methods) {
     MutexLocker ml(_state_lock);
     if (_state != IDLE) return;
 
+    FrameName fn(false, true, _threads);
     double percent = 100.0 / _total_counter;
     char buf[1024];
 
@@ -502,9 +553,9 @@ void Profiler::dumpFlat(std::ostream& out, int max_methods) {
         MethodSample& method = _methods[i];
         if (method._samples == 0) break;
 
-        FrameName fn(method._method, true);
+        const char* frame_name = fn.name(method._method);
         snprintf(buf, sizeof(buf), "%12lld (%5.2f%%)  %6lld  %s\n",
-                 method._counter, method._counter * percent, method._samples, fn.toString());
+                 method._counter, method._counter * percent, method._samples, frame_name);
         out << buf;
     }
 }
@@ -512,7 +563,7 @@ void Profiler::dumpFlat(std::ostream& out, int max_methods) {
 void Profiler::runInternal(Arguments& args, std::ostream& out) {
     switch (args._action) {
         case ACTION_START: {
-            Error error = start(args._event, args._interval, args._framebuf);
+            Error error = start(args._event, args._interval, args._framebuf, args._threads);
             if (error) {
                 out << error.message() << std::endl;
             } else {
@@ -525,7 +576,7 @@ void Profiler::runInternal(Arguments& args, std::ostream& out) {
             if (error) {
                 out << error.message() << std::endl;
             } else {
-                out << "Stopped profiling after " << uptime() << " seconds" << std::endl;
+                out << "Stopped profiling after " << uptime() << " seconds. No dump options specified" << std::endl;
             }
             break;
         }
@@ -553,7 +604,8 @@ void Profiler::runInternal(Arguments& args, std::ostream& out) {
         }
         case ACTION_DUMP:
             stop();
-            if (args._dump_collapsed) dumpCollapsed(out, args._counter);
+            if (args._dump_collapsed) dumpCollapsed(out, args);
+            if (args._dump_flamegraph) dumpFlameGraph(out, args);
             if (args._dump_summary) dumpSummary(out);
             if (args._dump_traces > 0) dumpTraces(out, args._dump_traces);
             if (args._dump_flat > 0) dumpFlat(out, args._dump_flat);
@@ -575,4 +627,16 @@ void Profiler::run(Arguments& args) {
             std::cerr << "Could not open " << args._file << std::endl;
         }
     }
+}
+
+void Profiler::shutdown(Arguments& args) {
+    MutexLocker ml(_state_lock);
+
+    // The last chance to dump profile before VM terminates
+    if (_state == RUNNING && args.dumpRequested()) {
+        args._action = ACTION_DUMP;
+        run(args);
+    }
+
+    _state = TERMINATED;
 }

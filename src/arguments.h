@@ -49,9 +49,6 @@ class Error {
   public:
     static const Error OK;
 
-    Error() {
-    }
-
     explicit Error(const char* message) : _message(message) {
     }
 
@@ -68,9 +65,6 @@ class Error {
 class Arguments {
   private:
     char _buf[1024];
-    Error _error;
-
-    Error parse(char* args);
 
   public:
     Action _action;
@@ -78,29 +72,47 @@ class Arguments {
     const char* _event;
     long _interval;
     int _framebuf;
+    bool _threads;
+    bool _simple;
     char* _file;
     bool _dump_collapsed;
+    bool _dump_flamegraph;
     bool _dump_summary;
     int _dump_traces;
     int _dump_flat;
+    // FlameGraph parameters
+    const char* _title;
+    int _width;
+    int _height;
+    double _minwidth;
+    bool _reverse;
 
-    Arguments(char* args) :
+    Arguments() :
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
         _event(EVENT_CPU),
         _interval(0),
         _framebuf(DEFAULT_FRAMEBUF),
+        _threads(false),
+        _simple(false),
         _file(NULL),
         _dump_collapsed(false),
+        _dump_flamegraph(false),
         _dump_summary(false),
         _dump_traces(0),
-        _dump_flat(0) {
-        _error = parse(args);
+        _dump_flat(0),
+        _title("Flame Graph"),
+        _width(1200),
+        _height(16),
+        _minwidth(1),
+        _reverse(false) {
     }
 
-    Error error() {
-        return _error;
+    bool dumpRequested() {
+        return _dump_collapsed || _dump_flamegraph || _dump_summary || _dump_traces > 0 || _dump_flat > 0;
     }
+
+    Error parse(const char* args);
 };
 
 #endif // _ARGUMENTS_H

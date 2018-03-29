@@ -10,7 +10,7 @@ async-profiler can trace the following kinds of events:
  - CPU cycles
  - Hardware and Software performance counters like cache misses, branch misses, page faults, context switches etc.
  - Allocations in Java Heap
- - Contented lock attempts of Java monitors
+ - Contented lock attempts, including both Java object monitors and ReentrantLocks
 
 ## CPU profiling
 
@@ -153,21 +153,22 @@ Samples: 679 (98.84%)
 This indicates that the hottest method was `Primes.isPrime`, and the hottest
 call stack leading to it comes from `Primes.primesThread`.
 
-## Generating Flame Graphs
+## Flame Graph visualization
 
-To generate flame graphs or other visualizations from the collected profiling
-information, you will need to dump the raw collected traces to a file and then
-post-process it. The following example uses Brendan Gregg's
-[FlameGraph](https://github.com/BrendanGregg/FlameGraph) scripts, but a similar
-solution can be tailored to other visualization tools.
+async-profiler provides out-of-the-box [Flame Graph](https://github.com/BrendanGregg/FlameGraph) support.
+Specify `-o svg` argument to dump profiling results as an interactive SVG
+immediately viewable in all mainstream browsers.
+Also, SVG output format will be chosen automatically if the target
+filename ends with `.svg`.
 
 ```
 $ jps
 9234 Jps
 8983 Computey
-$ ./profiler.sh -d 30 -o collapsed -f /tmp/collapsed.txt 8983
-$ FlameGraph/flamegraph.pl --colors=java /tmp/collapsed.txt > /tmp/flamegraph.svg
+$ ./profiler.sh -d 30 -f /tmp/flamegraph.svg 8983
 ```
+
+![Example](https://github.com/jvm-profiling-tools/async-profiler/blob/master/demo/SwingSet2.svg)
 
 ## Profiler Options
 
@@ -194,11 +195,11 @@ Example: `./profiler.sh -d 30 8983`
 Use `list` to see the complete list of available events.
 
   In allocation profiling mode the top frame of every call trace is the class
-of the allocated object, and the counter is the total allocated bytes
-in all samples of the given call trace.
+of the allocated object, and the counter is the heap pressure (the total size
+of allocated TLABs or objects outside TLAB).
 
-  In lock profiling mode the top frame is the class of monitor object, and
-the counter is number of nanoseconds it took to enter the monitor.  
+  In lock profiling mode the top frame is the class of lock/monitor, and
+the counter is number of nanoseconds it took to enter this lock/monitor.  
 
 * `-i N` - sets the profiling interval, in nanoseconds. Only CPU active time
 is counted. No samples are collected while CPU is idle. The default is
@@ -210,6 +211,12 @@ method ids that should fit in the buffer. If you receive messages about an
 insufficient frame buffer size, increase this value from the default.  
 Example: `./profiler.sh -b 5000000 8983`
 
+* `-t` - profile threads separately. Each stack trace will end with a frame
+that denotes a single thread.  
+Example: `./profiler.sh -t 8983`
+
+* `-s` - print simple class names instead of FQN.
+
 * `-o fmt[,fmt...]` - specifies what information to dump when profiling ends.
 This is a comma-separated list of the following options:
   - `summary` - dump basic profiling statistics;
@@ -218,14 +225,17 @@ This is a comma-separated list of the following options:
   - `collapsed[=C]` - dump collapsed call traces in the format used by
   [FlameGraph](https://github.com/brendangregg/FlameGraph) script. This is
   a collection of call stacks, where each line is a semicolon separated list
-  of frames followed by a counter. For example:
-  ```
-  java/lang/Thread.run;Primes$1.run;Primes.access$000;Primes.primesThread;Primes.isPrime 1056
-  ```
-  - `collapsed=samples` - the counter is a number of samples for the given trace;  
-  - `collaped=total` - the counter is a total value of collected metric, e.g. total allocation size.
+  of frames followed by a counter.
+  - `svg[=C]` - produce Flame Graph in SVG format.
+  
+  `C` is a counter type:
+  - `samples` - the counter is a number of samples for the given trace;
+  - `total` - the counter is a total value of collected metric, e.g. total allocation size.
   
   The default format is `summary,traces=200,flat=200`.
+
+* `--title TITLE`, `--width PX`, `--height PX`, `--minwidth PX`, `--reverse` - FlameGraph parameters.  
+Example: `./profiler.sh -f profile.svg --title "Sample CPU profile" --minwidth 0.5 8983`
 
 * `-f FILENAME` - the file name to dump the profile information to.  
 Example: `./profiler.sh -o collapsed -f /tmp/traces.txt 8983`
@@ -254,6 +264,14 @@ code started running, you will not see the first two frames in the resulting
 stack. On the other hand, you _will_ see non-Java frames (user and kernel)
 invoked by your Java code.
 
+* No Java stacks will be collected if `-XX:MaxJavaStackTraceDepth` is zero
+or negative.
+
+* Too short profiling interval may cause continuous interruption of heavy
+system calls like `clone()`, so that it will never complete;
+see [#97](https://github.com/jvm-profiling-tools/async-profiler/issues/97).
+The workaround is simply to increase the interval.
+
 ## Troubleshooting
 
 `Could not start attach mechanism: No such file or directory` means that the profiler cannot establish communication with the target JVM through UNIX domain socket.
@@ -262,6 +280,11 @@ For the profiler to be able to access JVM, make sure
  1. You run profiler under exactly the same user as the owner of target JVM process.
  2. `/tmp` directory of Java process is physically the same directory as `/tmp` of your shell.
  3. JVM is not run with `-XX:+DisableAttachMechanism` option.
+
+---
+
+`Failed to inject profiler into <pid>` means that the connection with the target JVM has been established, but JVM is unable to load profiler shared library.
+Make sure the user of JVM process has permissions to access `libasyncProfiler.so` by exactly the same absolute path. For more information see [#78](https://github.com/jvm-profiling-tools/async-profiler/issues/78).
 
 ---
 

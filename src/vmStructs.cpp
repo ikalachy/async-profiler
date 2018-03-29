@@ -24,6 +24,9 @@ int VMStructs::_klass_name_offset = -1;
 int VMStructs::_symbol_length_offset = -1;
 int VMStructs::_symbol_body_offset = -1;
 int VMStructs::_class_klass_offset = -1;
+int VMStructs::_thread_osthread_offset = -1;
+int VMStructs::_osthread_id_offset = -1;
+bool VMStructs::_has_perm_gen = false;
 
 static uintptr_t readSymbol(NativeCodeCache* lib, const char* symbol_name) {
     const void* symbol = lib->findSymbol(symbol_name);
@@ -71,6 +74,16 @@ bool VMStructs::init(NativeCodeCache* libjvm) {
             if (strcmp(field, "_klass_offset") == 0) {
                 _class_klass_offset = **(int**)(entry + address_offset);
             }
+        } else if (strcmp(type, "JavaThread") == 0) {
+            if (strcmp(field, "_osthread") == 0) {
+                _thread_osthread_offset = *(int*)(entry + offset_offset);
+            }
+        } else if (strcmp(type, "OSThread") == 0) {
+            if (strcmp(field, "_thread_id") == 0) {
+                _osthread_id_offset = *(int*)(entry + offset_offset);
+            }
+        } else if (strcmp(type, "PermGen") == 0) {
+            _has_perm_gen = true;
         }
 
         entry += stride;

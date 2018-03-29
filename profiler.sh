@@ -15,19 +15,44 @@ usage() {
     echo "  -f filename       dump output to <filename>"
     echo "  -i interval       sampling interval in nanoseconds"
     echo "  -b bufsize        frame buffer size"
-    echo "  -o fmt[,fmt...]   output format: summary|traces|flat|collapsed"
+    echo "  -t                profile different threads separately"
+    echo "  -s                simple class names instead of FQN"
+    echo "  -o fmt[,fmt...]   output format: summary|traces|flat|collapsed|svg"
+    echo ""
+    echo "  --title string    SVG title"
+    echo "  --width px        SVG width"
+    echo "  --height px       SVG frame height"
+    echo "  --minwidth px     skip frames smaller than px"
+    echo "  --reverse         generate stack-reversed FlameGraph"
     echo ""
     echo "<pid> is a numeric process ID of the target JVM"
     echo "      or 'jps' keyword to find running JVM automatically using jps tool"
     echo ""
-    echo "Example: $0 -d 30 -f profile.fg -o collapsed 3456"
+    echo "Example: $0 -d 30 -f profile.svg 3456"
     echo "         $0 start -i 999000 jps"
     echo "         $0 stop -o summary,flat jps"
     exit 1
 }
 
+mirror_output() {
+    # Mirror output from temporary file to local terminal
+    if [[ $USE_TMP ]]; then
+        if [[ -f $FILE ]]; then
+            cat $FILE
+            rm $FILE
+        fi
+    fi
+}
+
+check_if_terminated() {
+    if ! kill -0 $PID 2> /dev/null; then
+        mirror_output
+        exit 0
+    fi
+}
+
 jattach() {
-    $JATTACH $PID load $PROFILER true $1 > /dev/null
+    $JATTACH $PID load "$PROFILER" true "$1" > /dev/null
     RET=$?
 
     # Check if jattach failed
@@ -36,21 +61,15 @@ jattach() {
             echo "Failed to inject profiler into $PID"
             UNAME_S=$(uname -s)
             if [ "$UNAME_S" == "Darwin" ]; then
-                otool -L $PROFILER
+                otool -L "$PROFILER"
             else
-                ldd $PROFILER
+                ldd "$PROFILER"
             fi
         fi
         exit $RET
     fi
 
-    # Duplicate output from temporary file to local terminal
-    if [[ $USE_TMP ]]; then
-        if [[ -f $FILE ]]; then
-            cat $FILE
-            rm $FILE
-        fi
-    fi
+    mirror_output
 }
 
 function abspath() {
@@ -74,7 +93,9 @@ FILE=""
 USE_TMP="true"
 INTERVAL=""
 FRAMEBUF=""
-OUTPUT="summary,traces=200,flat=200"
+THREADS=""
+OUTPUT=""
+FORMAT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -105,9 +126,31 @@ while [[ $# -gt 0 ]]; do
             FRAMEBUF=",framebuf=$2"
             shift
             ;;
+        -t)
+            THREADS=",threads"
+            ;;
+        -s)
+            FORMAT="$FORMAT,simple"
+            ;;
         -o)
             OUTPUT="$2"
             shift
+            ;;
+        --title)
+            # escape XML special characters and comma
+            TITLE=${2//&/&amp;}
+            TITLE=${TITLE//</&lt;}
+            TITLE=${TITLE//>/&gt;}
+            TITLE=${TITLE//,/&#44;}
+            FORMAT="$FORMAT,title=$TITLE"
+            shift
+            ;;
+        --width|--height|--minwidth)
+            FORMAT="$FORMAT,${1:2}=$2"
+            shift
+            ;;
+        --reverse)
+            FORMAT="$FORMAT,reverse"
             ;;
         [0-9]*)
             PID="$1"
@@ -132,22 +175,36 @@ if [[ $USE_TMP ]]; then
     FILE=$(mktemp /tmp/async-profiler.XXXXXXXX)
 fi
 
+# select default output format
+if [[ "$OUTPUT" == "" ]]; then
+    if [[ $FILE == *.svg ]]; then
+        OUTPUT="svg"
+    elif [[ $FILE == *.collapsed ]] || [[ $FILE == *.folded ]]; then
+        OUTPUT="collapsed"
+    else
+        OUTPUT="summary,traces=200,flat=200"
+    fi
+fi
+
 case $ACTION in
     start)
-        jattach start,event=$EVENT,file=$FILE$INTERVAL$FRAMEBUF
+        jattach "start,event=$EVENT,file=$FILE$INTERVAL$FRAMEBUF$THREADS,$OUTPUT$FORMAT"
         ;;
     stop)
-        jattach stop,file=$FILE,$OUTPUT
+        jattach "stop,file=$FILE,$OUTPUT$FORMAT"
         ;;
     status)
-        jattach status,file=$FILE
+        jattach "status,file=$FILE"
         ;;
     list)
-        jattach list,file=$FILE
+        jattach "list,file=$FILE"
         ;;
     collect)
-        jattach start,event=$EVENT,file=$FILE$INTERVAL$FRAMEBUF
-        sleep $DURATION
-        jattach stop,file=$FILE,$OUTPUT
+        jattach "start,event=$EVENT,file=$FILE$INTERVAL$FRAMEBUF$THREADS,$OUTPUT$FORMAT"
+        while (( DURATION-- > 0 )); do
+            check_if_terminated
+            sleep 1
+        done
+        jattach "stop,file=$FILE,$OUTPUT$FORMAT"
         ;;
 esac

@@ -14,13 +14,16 @@
  * limitations under the License.
  */
 
+#include <fstream>
 #include <sstream>
+#include <errno.h>
+#include <string.h>
 #include "arguments.h"
 #include "profiler.h"
 
 
-static void throw_illegal_state(JNIEnv* env, const char* message) {
-    jclass cls = env->FindClass("java/lang/IllegalStateException");
+static void throw_new(JNIEnv* env, const char* exception_class, const char* message) {
+    jclass cls = env->FindClass(exception_class);
     if (cls != NULL) {
         env->ThrowNew(cls, message);
     }
@@ -30,11 +33,11 @@ static void throw_illegal_state(JNIEnv* env, const char* message) {
 extern "C" JNIEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_start0(JNIEnv* env, jobject unused, jstring event, jlong interval) {
     const char* event_str = env->GetStringUTFChars(event, NULL);
-    Error error = Profiler::_instance.start(event_str, interval, DEFAULT_FRAMEBUF);
+    Error error = Profiler::_instance.start(event_str, interval, DEFAULT_FRAMEBUF, false);
     env->ReleaseStringUTFChars(event, event_str);
 
     if (error) {
-        throw_illegal_state(env, error.message());
+        throw_new(env, "java/lang/IllegalStateException", error.message());
     }
 }
 
@@ -43,7 +46,7 @@ Java_one_profiler_AsyncProfiler_stop0(JNIEnv* env, jobject unused) {
     Error error = Profiler::_instance.stop();
 
     if (error) {
-        throw_illegal_state(env, error.message());
+        throw_new(env, "java/lang/IllegalStateException", error.message());
     }
 }
 
@@ -53,9 +56,41 @@ Java_one_profiler_AsyncProfiler_getSamples(JNIEnv* env, jobject unused) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_one_profiler_AsyncProfiler_execute0(JNIEnv* env, jobject unused, jstring command) {
+    Arguments args;
+    const char* command_str = env->GetStringUTFChars(command, NULL);
+    Error error = args.parse(command_str);
+    env->ReleaseStringUTFChars(command, command_str);
+
+    if (error) {
+        throw_new(env, "java/lang/IllegalArgumentException", error.message());
+        return NULL;
+    }
+
+    if (args._file == NULL) {
+        std::ostringstream out;
+        Profiler::_instance.runInternal(args, out);
+        return env->NewStringUTF(out.str().c_str());
+    } else {
+        std::ofstream out(args._file, std::ios::out | std::ios::trunc);
+        if (out.is_open()) {
+            Profiler::_instance.runInternal(args, out);
+            out.close();
+            return env->NewStringUTF("OK");
+        } else {
+            throw_new(env, "java/io/IOException", strerror(errno));
+            return NULL;
+        }
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_one_profiler_AsyncProfiler_dumpCollapsed0(JNIEnv* env, jobject unused, jint counter) {
+    Arguments args;
+    args._counter = counter == COUNTER_SAMPLES ? COUNTER_SAMPLES : COUNTER_TOTAL;
+
     std::ostringstream out;
-    Profiler::_instance.dumpCollapsed(out, counter == COUNTER_SAMPLES ? COUNTER_SAMPLES : COUNTER_TOTAL);
+    Profiler::_instance.dumpCollapsed(out, args);
     return env->NewStringUTF(out.str().c_str());
 }
 

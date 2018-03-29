@@ -17,25 +17,54 @@
 #ifndef _FRAMENAME_H
 #define _FRAMENAME_H
 
+#include <jvmti.h>
+#include <locale.h>
+#include <map>
+#include <string>
 #include "vmEntry.h"
-#include "vmStructs.h"
 
+#ifdef __APPLE__
+#  include <xlocale.h>
+#endif
+
+
+class ThreadId {
+  private:
+    int _id;
+    const char* _name;
+
+  public:
+    static int comparator(const void* t1, const void* t2) {
+        return ((ThreadId*)t1)->_id - ((ThreadId*)t2)->_id;
+    }
+
+    friend class FrameName;
+};
+
+
+typedef std::map<jmethodID, std::string> JMethodCache;
 
 class FrameName {
   private:
+    JMethodCache _cache;
     char _buf[520];
-    const char* _str;
+    bool _simple;
+    bool _dotted;
+    locale_t _saved_locale;
+    int _thread_count;
+    ThreadId* _threads;
 
+    void initThreadMap();
+    const char* findThreadName(int tid);
     const char* cppDemangle(const char* name);
-    char* javaClassName(VMKlass* klass);
-    char* javaClassName(const char* symbol, int length, bool dotted);
+    char* javaMethodName(jmethodID method);
+    char* javaClassName(const char* symbol, int length, bool simple, bool dotted);
 
   public:
-    FrameName(ASGCT_CallFrame& frame, bool dotted = false);
+    FrameName(bool simple, bool dotted, bool use_thread_names);
+    ~FrameName();
 
-    const char* toString() {
-        return _str;
-    }
+    const char* name(ASGCT_CallFrame& frame);
 };
 
 #endif // _FRAMENAME_H
