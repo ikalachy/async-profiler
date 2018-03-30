@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mbean PUBLIC
+		"-//JBoss//DTD JBOSS XMBEAN 1.2//EN"
+		"http://www.jboss.org/j2ee/dtd/jboss_xmbean_1_2.dtd">
+<!--
+   JBoss Web XMBean descriptor
+-->
+<mbean>
+	<description>
+		This project is a low overhead sampling profiler for Java that does not suffer from Safepoint bias problem.
+		It features HotSpot-specific APIs to collect stack traces and to track memory allocations.
+		The profiler works with OpenJDK, Oracle JDK and other Java runtimes based on HotSpot JVM.
+
+		https://github.com/jvm-profiling-tools/async-profiler
+	</description>
+	<class>one.profiler.AsyncProfiler</class>
+
+	<attribute access="read-only" getMethod="getSamples">
+		<name>Samples</name>
+		<type>long</type>
+	</attribute>
+
+	<attribute access="read-write" getMethod="getLibPath" setMethod="setLibPath">
+		<name>LibPath</name>
+		<type>java.lang.String</type>
+	</attribute>
+
+
+	<!--AsyncProfiler operations -->
+
+	<operation>
+		<description>
+			pass command to native profiler: [action],event=[event],[options]
+			Actions:
+			start start profiling and return immediately
+			stop stop profiling
+			status print profiling status
+			list list profiling events supported by the target JVM
+			collect collect profile for the specified period of time
+			and then stop (default action)
+
+			Event: cpu|alloc|lock|cache-misses etc.
+
+			Options:
+			duration run profiling for N seconds
+			filename dump output to a file
+			interval sampling interval in nanoseconds
+			bufsize frame buffer size
+			fmt[,fmt...] output format: summary|traces|flat|collapsed|svg
+		</description>
+		<name>execute</name>
+		<parameter>
+			<description>example: start,event=cpu,flat</description>
+			<name>p1</name>
+			<type>java.lang.String</type>
+		</parameter>
+		<return-type>java.lang.String</return-type>
+	</operation>
+
+	<operation>
+		<description>Stop profiler sampling activity</description>
+		<name>stop</name>
+	</operation>
+
+	<operation>
+		<description>dump flat profile (top N hot methods)</description>
+		<name>dumpFlat</name>
+		<parameter>
+			<description>top N hot methods</description>
+			<name>p1</name>
+			<type>int</type>
+		</parameter>
+		<return-type>java.lang.String</return-type>
+	</operation>
+
+	<operation>
+		<description>dump call traces (at most N samples);</description>
+		<name>dumpTraces</name>
+		<parameter>
+			<description>most N samples</description>
+			<name>p1</name>
+			<type>int</type>
+		</parameter>
+		<return-type>java.lang.String</return-type>
+	</operation>
+
+	<operation>
+		<description>dump collapsed call traces in the format used by FlameGraph script.
+			This is a collection of call stacks, where each line is a semicolon separated list of frames followed by a counter.
+		</description>
+		<name>dumpCollapsed</name>
+		<parameter>
+			<description>SAMPLES or TOTAL</description>
+			<name>p1</name>
+			<type>one.profiler.Counter</type>
+		</parameter>
+		<return-type>java.lang.String</return-type>
+	</operation>
+
+
+	<!--
+	<operation>
+		<description>Start command</description>
+		<name>start</name>
+		<parameter>
+			<name>p1</name>
+			<type>java.lang.String</type>
+		</parameter>
+		<parameter>
+			<name>p2</name>
+			<type>long</type>
+		</parameter>
+		<return-type>java.lang.String</return-type>
+	</operation>
+	-->
+
+
+	<operation>
+		<description>Register Instance for JConsole</description>
+		<name>registerInstance</name>
+		<return-type>java.lang.String</return-type>
+	</operation>
+
+</mbean>
