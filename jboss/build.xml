@@ -5,8 +5,6 @@
 	<!-- Setting build properties -->
 	<property environment="env"/>
 
-	<property file="../${user.name}-ant-build.properties"/>
-	<property file="../build.properties"/>
 
 	<!--  module specific -->
 	<property file="build.properties"/>
